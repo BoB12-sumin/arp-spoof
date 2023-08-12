@@ -2,7 +2,6 @@ LDLIBS=-lpcap
 
 all: send-arp-test
 
- 
 main.o: pcap_hdr.h mac.h ip.h ethhdr.h arphdr.h main.cpp
 
 arphdr.o: mac.h ip.h arphdr.h arphdr.cpp
