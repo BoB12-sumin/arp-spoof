@@ -355,11 +355,6 @@ int main(int argc, char* argv[]){
                 
             else if (Mac(eth_hdr->ether_shost) == mac_send && lay2_eth_hdr->type_ != htons(EthHdr::Arp)){
                 printf("packet send!\n");
-
-                printf("현재 캡처 MAC:  %s and %s\n",
-                    static_cast<std::string>(Mac(eth_hdr->ether_shost)).c_str(),
-                    static_cast<std::string>(Mac(eth_hdr->ether_dhost)).c_str()
-                    );
                 //mac address modify
                 
                 lay2_eth_hdr->dmac_ = mac_tar;
