@@ -1,6 +1,6 @@
 
 #define ETHER_ADDR_LEN 6
-
+ 
 struct libnet_ethernet_hdr{
 	u_int8_t ether_dhost[ETHER_ADDR_LEN];
 	u_int8_t ether_shost[ETHER_ADDR_LEN];
